@@ -1,4 +1,3 @@
-
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -9,6 +8,7 @@ from collections import deque
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FFMPEG_PATH = os.path.join(PROJECT_ROOT, "bin", "ffmpeg", "ffmpeg.exe")
+COOKIES_FILE = os.getenv("YTDLP_COOKIEFILE", "data/cookies.txt")
 
 class Muzyka(commands.Cog):
     def __init__(self, bot):
@@ -20,8 +20,8 @@ class Muzyka(commands.Cog):
             self.queues[guild_id] = deque()
         return self.queues[guild_id]
 
-    @app_commands.command(name="play", description="Zagraj muzykę z YouTube")
-    @app_commands.describe(song_query="Fraza do wyszukania")
+    @app_commands.command(name="play", description="Zagraj muzykę z YouTube ")
+    @app_commands.describe(song_query="Nazwa lub URL")
     async def play(self, interaction: discord.Interaction, song_query: str):
         voice = interaction.user.voice
         if not voice or not voice.channel:
@@ -38,32 +38,49 @@ class Muzyka(commands.Cog):
         elif vc.channel != voice.channel:
             await vc.move_to(voice.channel)
 
-        query = f"ytsearch1:{song_query}"
         ydl_opts = {
             "format": "bestaudio[abr<=96]/bestaudio",
-            "noplaylist": True,
+            "noplaylist": False,  
+            "cookiefile": COOKIES_FILE,
             "youtube_include_dash_manifest": False,
             "youtube_include_hls_manifest": False,
         }
-        try:
-            results = await self._search_ytdlp_async(query, ydl_opts)
-        except Exception as e:
-            return await interaction.followup.send(f"❌ Błąd wyszukiwania: {e}")
-        if not results or not results.get("entries"):
-            return await interaction.followup.send("❌ Nie znaleziono żadnych wyników.")
 
-        track = results["entries"][0]
-        audio_url = track["url"]
-        title = track.get("title", "Untitled")
+ 
+        is_url = song_query.startswith(("http://", "https://","www."))
+
+        try:
+            if is_url:
+                info = await self._search_ytdlp_async(song_query, ydl_opts)
+            else:
+                query = f"ytsearch1:{song_query}"
+                info = await self._search_ytdlp_async(query, ydl_opts)
+        except Exception as e:
+            return await interaction.followup.send(f"❌ Błąd yt_dlp: {e}")
+
+        tracks = []
+        if "entries" in info and info["entries"]:
+            for entry in info["entries"]:
+                if entry:
+                    url = entry.get("url")
+                    title = entry.get("title","Untitled")
+                    tracks.append((url,title))
+        else:
+            url = info.get("url")
+            title = info.get("title","Untitled")
+            tracks.append((url,title))
+        if not tracks:
+            return await interaction.followup.send("Nie znaleziono żadnych utworów")
+
 
         queue = self.get_queue(guild_id)
-        queue.append((audio_url, title))
+        for url, title in tracks:
+            queue.append((url,title))
 
         if not vc.is_playing() and not vc.is_paused():
-            await interaction.followup.send(f"▶️ Teraz gra: **{title}**")
             await self._play_next(interaction.channel, vc, guild_id)
         else:
-            await interaction.followup.send(f"➕ Dodano do kolejki: **{title}**")
+            await interaction.followup.send(f" Dodano do kolejki: **{len(tracks)}**")
 
     @app_commands.command(name="skip", description="Pomiń aktualny utwór")
     async def skip(self, interaction: discord.Interaction):
@@ -101,13 +118,12 @@ class Muzyka(commands.Cog):
         if not vc:
             return await interaction.response.send_message("❌ Bot nie jest na kanale.", ephemeral=True)
 
-        # wyczyść kolejkę
         self.get_queue(guild_id).clear()
         if vc.is_playing() or vc.is_paused():
             vc.stop()
         await vc.disconnect()
         await interaction.response.send_message("■ Odtwarzanie zatrzymane, bot odłączony.")
-    
+
     @app_commands.command(name="queue", description="Pokaż nadchodzącą kolejkę")
     async def queue(self, interaction: discord.Interaction):
         guild_id = str(interaction.guild_id)
